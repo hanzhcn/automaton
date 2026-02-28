@@ -241,6 +241,91 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         return `USDC balance: ${balance.toFixed(6)} USDC on Base`;
       },
     },
+    // ── Revenue Tools (Earning) ──
+    {
+      name: "start_paid_service",
+      description:
+        "Start an HTTP service that charges USDC per request. Clients pay via x402 protocol (HTTP 402 + signed authorization). Your wallet receives payments on Base.",
+      category: "financial",
+      riskLevel: "caution",
+      parameters: {
+        type: "object",
+        properties: {
+          port: {
+            type: "number",
+            description: "Port number for the service (e.g., 3000)",
+          },
+          price_usd: {
+            type: "number",
+            description: "Price per request in USD (e.g., 0.01 for 1 cent)",
+          },
+          service_name: {
+            type: "string",
+            description: "Name of the service for logging",
+          },
+          execute_on_chain: {
+            type: "boolean",
+            description: "Whether to execute payments on-chain (requires ETH for gas). Default: false (validation only)",
+          },
+        },
+        required: ["port", "price_usd", "service_name"],
+      },
+      execute: async (args, ctx) => {
+        const { createX402Server } = await import("../revenue/index.js");
+        const port = args.port as number;
+        const priceUsd = args.price_usd as number;
+        const serviceName = args.service_name as string;
+        const executeOnChain = (args.execute_on_chain as boolean) ?? false;
+
+        // Track revenue in database
+        let totalRevenue = 0;
+        let requestCount = 0;
+
+        const server = createX402Server({
+          port,
+          payToAddress: ctx.identity.address,
+          priceUsd,
+          serviceName,
+          account: executeOnChain ? ctx.identity.account : undefined,
+          onPayment: (_payment, amount) => {
+            totalRevenue += amount;
+            requestCount++;
+            // Record revenue transaction
+            ctx.db.insertTransaction({
+              id: ulid(),
+              type: "transfer_in",
+              amountCents: Math.round(amount * 100),
+              balanceAfterCents: Math.round(totalRevenue * 100),
+              description: `x402 revenue: ${serviceName}`,
+              timestamp: new Date().toISOString(),
+            });
+          },
+          onService: async (path) => {
+            // Default service handler - just return path info
+            return {
+              service: serviceName,
+              path,
+              price: `$${priceUsd}`,
+              message: "Payment received. Service executed successfully.",
+            };
+          },
+        });
+
+        // Store server reference for potential cleanup
+        const serverKey = `paid_service_${port}`;
+        ctx.db.setKV(serverKey, JSON.stringify({
+          port,
+          serviceName,
+          priceUsd,
+          startedAt: new Date().toISOString(),
+        }));
+
+        return `Paid service "${serviceName}" started on port ${port} at $${priceUsd}/request. ` +
+          `Receiving address: ${ctx.identity.address}. ` +
+          `On-chain execution: ${executeOnChain ? "enabled" : "disabled"}. ` +
+          `Use expose_port(${port}) to make it publicly accessible.`;
+      },
+    },
     {
       name: "topup_credits",
       description:
